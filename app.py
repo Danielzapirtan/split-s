@@ -3,11 +3,6 @@ import re
 import random
 import os
 
-'''
-  Split a PDF book by chapters
-  Fixed version
-'''
-
 maxlevel = 1
 _MAXVALUE = 20000
 input_path = '/content/drive/MyDrive/boox/Chain.pdf'
@@ -38,13 +33,13 @@ def eval(page):
 def minimax(reader):
     pagelist = reader.pages
     valuelist = []
-    num_pages = 15
+    num_chapters = 15
     
     for i, page in enumerate(pagelist):
         value = eval(page)
         valuelist.append([value, i])
     
-    valuelist = sorted(valuelist)[:num_pages]
+    valuelist = sorted(valuelist)[:num_chapters]
     chapter_delimiters = []
     for pair in valuelist:
         chapter_delimiters.append(pair[1])
