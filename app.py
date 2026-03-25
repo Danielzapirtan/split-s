@@ -65,18 +65,14 @@ def generate_toc_with_gemini(pdf_text: str, api_key: str) -> str:
     genai.configure(api_key=api_key)
     
     # Use the most cost-effective model
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash')
     
     # Optimized prompt for minimal token usage
     prompt = f"""Analyze this academic chapter and create a detailed Table of Contents with section numbers.
 
 CRITICAL RULES:
 1. Use numbers with dots (e.g., 1, 1.1, 1.1.1, 2, 2.1, etc.)
-2. Skip all metadata, headers, footers, references, and page numbers
-3. Focus ONLY on actual content sections and subsections
-4. Be extremely detailed - capture every logical section break
-5. Format as plain text, one line per entry
-6. Format: "X.Y.Z Section Title"
+2. Use AI to find section titles in the PDF even if they had not be numbered there
 
 Output ONLY the TOC, no explanations.
 
