@@ -65,7 +65,7 @@ def generate_toc_with_gemini(pdf_text: str, api_key: str) -> str:
     genai.configure(api_key=api_key)
     
     # Use the most cost-effective model
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash-lite')
     
     # Optimized prompt for minimal token usage
     prompt = f"""Analyze this academic chapter and create a detailed Table of Contents with section numbers.
