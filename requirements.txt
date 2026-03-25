@@ -1,4 +1,2 @@
-# requirements.txt
-
-pdfplumber
-scikit-learn
+google-generativeai==0.3.2
+PyMuPDF==1.23.8

@@ -1,201 +1,177 @@
-# app.py
-
 import argparse
-import json
+import sys
+import os
+import fitz  # PyMuPDF
+import google.generativeai as genai
+from typing import List, Dict, Tuple
 import re
-from collections import defaultdict
 
-import pdfplumber
-from sklearn.feature_extraction.text import TfidfVectorizer
+def extract_text_from_pdf(pdf_path: str) -> Tuple[str, List[Dict]]:
+    """
+    Extract text from PDF with page numbers for context.
+    Returns full text and list of page-wise text chunks.
+    """
+    try:
+        doc = fitz.open(pdf_path)
+        full_text = ""
+        pages_text = []
+        
+        for page_num, page in enumerate(doc, 1):
+            text = page.get_text()
+            full_text += text + "\n\n"
+            pages_text.append({
+                "page": page_num,
+                "text": text[:3000]  # Store first 3000 chars per page for context
+            })
+        
+        doc.close()
+        return full_text, pages_text
+    except Exception as e:
+        print(f"Error reading PDF: {e}", file=sys.stderr)
+        sys.exit(1)
 
-
-# -------------------------
-# Heuristics
-# -------------------------
-
-HEADING_PATTERNS = [
-    r"^(chapter|capitolul)\s+\d+",
-    r"^\d+\.",
-    r"^\d+\.\d+",
-    r"^\d+\.\d+\.\d+",
-]
-
-MAX_HEADING_WORDS = 18
-MIN_HEADING_SIZE_DELTA = 0.5
-
-
-def is_heading(text, size, avg_size):
-    t = text.strip()
-    if not t:
-        return False
-
-    if len(t.split()) > MAX_HEADING_WORDS:
-        return False
-
-    for p in HEADING_PATTERNS:
-        if re.match(p, t.lower()):
-            return True
-
-    if size >= avg_size + MIN_HEADING_SIZE_DELTA:
-        return True
-
-    if t.isupper():
-        return True
-
-    return False
-
-
-def clean_line(text):
-    return re.sub(r"\s+", " ", text).strip()
-
-
-# -------------------------
-# PDF Parsing
-# -------------------------
-
-def extract_lines(pdf_path):
-    lines = []
-    sizes = []
-
-    with pdfplumber.open(pdf_path) as pdf:
-        for page_num, page in enumerate(pdf.pages):
-            words = page.extract_words(extra_attrs=["size", "fontname"])
-
-            current_line = []
-            current_y = None
-
-            for w in words:
-                if current_y is None:
-                    current_y = w["top"]
-
-                if abs(w["top"] - current_y) > 3:
-                    if current_line:
-                        text = " ".join([x["text"] for x in current_line])
-                        avg_size = sum(x["size"] for x in current_line) / len(current_line)
-                        lines.append((clean_line(text), avg_size, page_num))
-                        sizes.append(avg_size)
-                    current_line = []
-                    current_y = w["top"]
-
-                current_line.append(w)
-
-            if current_line:
-                text = " ".join([x["text"] for x in current_line])
-                avg_size = sum(x["size"] for x in current_line) / len(current_line)
-                lines.append((clean_line(text), avg_size, page_num))
-                sizes.append(avg_size)
-
-    global_avg = sum(sizes) / len(sizes) if sizes else 10
-    return lines, global_avg
-
-
-# -------------------------
-# Summarization
-# -------------------------
-
-def summarize_block(text, n_sent=2):
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    if len(sentences) <= n_sent:
-        return text
-
-    vectorizer = TfidfVectorizer()
-    X = vectorizer.fit_transform(sentences)
-    scores = X.sum(axis=1)
-
-    ranked = sorted(
-        [(i, scores[i, 0]) for i in range(len(sentences))],
-        key=lambda x: x[1],
-        reverse=True,
-    )
-
-    selected = sorted(i for i, _ in ranked[:n_sent])
-    return " ".join(sentences[i] for i in selected)
-
-
-# -------------------------
-# TOC Builder
-# -------------------------
-
-def detect_level(text):
-    m = re.match(r"^(\d+(\.\d+)*)", text)
-    if m:
-        return m.group(1).count(".") + 1
-
-    if text.isupper():
-        return 1
-
-    return 2
-
-
-def build_toc(lines, avg_size, summarize=False):
-    toc = []
-    stack = []
-
-    current_block = []
-    current_node = None
-
-    for text, size, page in lines:
-        if is_heading(text, size, avg_size):
-            if current_node and summarize:
-                current_node["summary"] = summarize_block(" ".join(current_block))
-            current_block = []
-
-            level = detect_level(text)
-            node = {
-                "title": text,
-                "page": page + 1,
-                "level": level,
-                "children": [],
-            }
-
-            while stack and stack[-1]["level"] >= level:
-                stack.pop()
-
-            if stack:
-                stack[-1]["children"].append(node)
-            else:
-                toc.append(node)
-
-            stack.append(node)
-            current_node = node
+def sample_text_evenly(pages_text: List[Dict], max_chars: int = 15000) -> str:
+    """
+    Sample text evenly across pages to stay within token limits.
+    """
+    total_pages = len(pages_text)
+    sampled_text = []
+    
+    # Distribute sampling across pages
+    chars_per_page = max_chars // total_pages if total_pages > 0 else max_chars
+    
+    for page_info in pages_text:
+        page_text = page_info["text"]
+        if len(page_text) > chars_per_page:
+            # Take beginning and end of long pages
+            half = chars_per_page // 2
+            sampled = f"[Page {page_info['page']}] ... {page_text[:half]} ... {page_text[-half:]} ..."
         else:
-            current_block.append(text)
+            sampled = f"[Page {page_info['page']}] {page_text}"
+        sampled_text.append(sampled)
+    
+    # Join and trim if still too long
+    result = "\n\n".join(sampled_text)
+    if len(result) > max_chars:
+        result = result[:max_chars] + "..."
+    
+    return result
 
-    if current_node and summarize:
-        current_node["summary"] = summarize_block(" ".join(current_block))
+def generate_toc_with_gemini(pdf_text: str, api_key: str) -> str:
+    """
+    Generate detailed TOC using Gemini API with minimal token usage.
+    """
+    # Configure Gemini
+    genai.configure(api_key=api_key)
+    
+    # Use the most cost-effective model
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    # Optimized prompt for minimal token usage
+    prompt = f"""Analyze this academic chapter and create a detailed Table of Contents with section numbers.
 
-    return toc
+CRITICAL RULES:
+1. Use numbers with dots (e.g., 1, 1.1, 1.1.1, 2, 2.1, etc.)
+2. Skip all metadata, headers, footers, references, and page numbers
+3. Focus ONLY on actual content sections and subsections
+4. Be extremely detailed - capture every logical section break
+5. Format as plain text, one line per entry
+6. Format: "X.Y.Z Section Title"
 
+Output ONLY the TOC, no explanations.
 
-# -------------------------
-# CLI / Input
-# -------------------------
+CHAPTER TEXT:
+{pdf_text}"""
+
+    try:
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        print(f"Gemini API error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+def parse_and_format_toc(toc_text: str) -> str:
+    """
+    Clean and format the TOC output.
+    """
+    lines = toc_text.split('\n')
+    formatted_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Remove markdown formatting
+        line = re.sub(r'[*_#]', '', line)
+        
+        # Ensure proper numbering format
+        if re.match(r'^\d+(\.\d+)*\s+', line):
+            formatted_lines.append(line)
+        elif line:
+            # If line doesn't start with numbers, try to infer
+            formatted_lines.append(line)
+    
+    return '\n'.join(formatted_lines)
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--pdf", help="Path to PDF")
-    parser.add_argument("--out", default="toc.json")
-    parser.add_argument("--summarize", action="store_true")
-
+    parser = argparse.ArgumentParser(
+        description='Generate detailed TOC from PDF chapter using Gemini API'
+    )
+    parser.add_argument(
+        '--pdf',
+        required=True,
+        help='Path to the PDF file'
+    )
+    parser.add_argument(
+        '--api-key',
+        help='Gemini API key (or set GEMINI_API_KEY environment variable)'
+    )
+    parser.add_argument(
+        '--output',
+        help='Output file (default: print to stdout)'
+    )
+    
     args = parser.parse_args()
-
-    pdf_path = args.pdf or input("PDF path: ").strip()
-    out_path = args.out or input("Output file [toc.json]: ").strip() or "toc.json"
-
-    if args.summarize:
-        summarize = True
+    
+    # Get API key
+    api_key = args.api_key or os.environ.get('GEMINI_API_KEY')
+    if not api_key:
+        print("Error: Gemini API key required. Set GEMINI_API_KEY env var or use --api-key", 
+              file=sys.stderr)
+        sys.exit(1)
+    
+    # Check if PDF exists
+    if not os.path.exists(args.pdf):
+        print(f"Error: PDF file not found: {args.pdf}", file=sys.stderr)
+        sys.exit(1)
+    
+    print(f"Processing PDF: {args.pdf}", file=sys.stderr)
+    
+    # Extract text from PDF
+    print("Extracting text from PDF...", file=sys.stderr)
+    full_text, pages_text = extract_text_from_pdf(args.pdf)
+    
+    # Sample text intelligently to minimize API quota usage
+    print("Sampling text for API processing...", file=sys.stderr)
+    sampled_text = sample_text_evenly(pages_text, max_chars=12000)  # ~3000 tokens
+    
+    # Generate TOC with Gemini
+    print("Generating TOC with Gemini API...", file=sys.stderr)
+    toc_raw = generate_toc_with_gemini(sampled_text, api_key)
+    
+    # Format the TOC
+    toc_formatted = parse_and_format_toc(toc_raw)
+    
+    # Output results
+    if args.output:
+        with open(args.output, 'w', encoding='utf-8') as f:
+            f.write(toc_formatted)
+        print(f"TOC written to: {args.output}", file=sys.stderr)
     else:
-        s = input("Summarize paragraphs? (y/n): ").lower().strip()
-        summarize = s == "y"
-
-    lines, avg_size = extract_lines(pdf_path)
-    toc = build_toc(lines, avg_size, summarize)
-
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(toc, f, ensure_ascii=False, indent=2)
-
-    print(f"Saved TOC to {out_path}")
-
+        print(toc_formatted)
+    
+    print("Done!", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
